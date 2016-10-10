@@ -85,29 +85,33 @@ func (ic *interceptor) Intercept(w http.ResponseWriter, req *http.Request, forwa
 	}
 
 	if pipe {
-		ic.pipe(req, forwardInitialRequest, op, downstream, downstreamBuffered, upstream)
+		ic.pipe(w, req, forwardInitialRequest, op, downstream, downstreamBuffered, upstream)
 	} else {
 		ic.http(req, forwardInitialRequest, op, downstream, downstreamBuffered, upstream)
 	}
 }
 
-func respondOK(writer io.Writer, req *http.Request) error {
-	return respondHijacked(writer, req, http.StatusOK)
+func respondOK(writer io.Writer, req *http.Request, respHeaders http.Header) error {
+	return respondHijacked(writer, req, http.StatusOK, respHeaders)
 }
 
 func respondBadGatewayHijacked(writer io.Writer, req *http.Request) error {
 	log.Debugf("Responding %v", http.StatusBadGateway)
-	return respondHijacked(writer, req, http.StatusBadGateway)
+	return respondHijacked(writer, req, http.StatusBadGateway, make(http.Header))
 }
 
-func respondHijacked(writer io.Writer, req *http.Request, statusCode int) error {
+func respondHijacked(writer io.Writer, req *http.Request, statusCode int, respHeaders http.Header) error {
 	defer func() {
 		if err := req.Body.Close(); err != nil {
 			log.Debugf("Error closing body of OK response: %s", err)
 		}
 	}()
 
+	if respHeaders == nil {
+		respHeaders = make(http.Header)
+	}
 	resp := &http.Response{
+		Header:     respHeaders,
 		StatusCode: statusCode,
 		ProtoMajor: 1,
 		ProtoMinor: 1,

@@ -11,12 +11,12 @@ import (
 	"github.com/getlantern/ops"
 )
 
-func (ic *interceptor) pipe(req *http.Request, forwardInitialRequest bool, op ops.Op, downstream net.Conn, downstreamBuffered *bufio.ReadWriter, upstream net.Conn) {
+func (ic *interceptor) pipe(w http.ResponseWriter, req *http.Request, forwardInitialRequest bool, op ops.Op, downstream net.Conn, downstreamBuffered *bufio.ReadWriter, upstream net.Conn) {
 	success := make(chan bool, 1)
 	op.Go(func() {
 		// For CONNECT requests, send OK response
 		if req.Method == "CONNECT" {
-			err := respondOK(downstream, req)
+			err := respondOK(downstream, req, w.Header())
 			if err != nil {
 				op.FailIf(log.Errorf("Unable to respond OK: %s", err))
 				success <- false
