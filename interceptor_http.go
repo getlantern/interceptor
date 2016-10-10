@@ -14,7 +14,9 @@ import (
 )
 
 func (ic *interceptor) http(req *http.Request, forwardInitialRequest bool, op ops.Op, downstream net.Conn, downstreamBuffered *bufio.ReadWriter, upstream net.Conn) {
-	requests := make(chan *http.Request, 1)
+	// Positive buffer size allows queuing multiple requests before getting a
+	// response from the server.
+	requests := make(chan *http.Request, 100)
 
 	op.Go(func() {
 		go ic.httpUp(req, forwardInitialRequest, op, downstream, downstreamBuffered, upstream, requests)
