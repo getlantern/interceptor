@@ -11,6 +11,7 @@ import (
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
+	"github.com/getlantern/hidden"
 	"github.com/getlantern/ops"
 )
 
@@ -73,7 +74,7 @@ func (ic *interceptor) Intercept(w http.ResponseWriter, req *http.Request, forwa
 
 	upstream, pipe, err := ic.Dial(req, addr, port)
 	if err != nil {
-		respondBadGateway(w, op.FailIf(errors.New("Could not dial %v", err)))
+		respondBadGateway(w, op.FailIf(errors.New("Could not dial '%v': %v", addr, err)))
 		return
 	}
 
@@ -102,8 +103,10 @@ func respondBadGatewayHijacked(writer io.Writer, req *http.Request) error {
 
 func respondHijacked(writer io.Writer, req *http.Request, statusCode int, respHeaders http.Header) error {
 	defer func() {
-		if err := req.Body.Close(); err != nil {
-			log.Debugf("Error closing body of OK response: %s", err)
+		if req.Body != nil {
+			if err := req.Body.Close(); err != nil {
+				log.Debugf("Error closing body of request: %s", err)
+			}
 		}
 	}()
 
@@ -122,7 +125,7 @@ func respondHijacked(writer io.Writer, req *http.Request, statusCode int, respHe
 func respondBadGateway(w http.ResponseWriter, err error) {
 	log.Debugf("Responding BadGateway: %v", err)
 	w.WriteHeader(http.StatusBadGateway)
-	if _, writeError := w.Write([]byte(err.Error())); writeError != nil {
+	if _, writeError := w.Write([]byte(hidden.Clean(err.Error()))); writeError != nil {
 		log.Debugf("Error writing error to ResponseWriter: %v", writeError)
 	}
 }
