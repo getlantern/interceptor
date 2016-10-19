@@ -61,6 +61,7 @@ func (ic *interceptor) applyPipeDefaults() {
 }
 
 func (ic *interceptor) defaultGetBuffer() []byte {
+	// We use the same default buffer size as io.Copy.
 	return make([]byte, 32768)
 }
 
