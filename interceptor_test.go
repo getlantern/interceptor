@@ -99,6 +99,9 @@ func doTest(t *testing.T, op ops.Op, requestMethod string, pipe bool, forwardIni
 		return
 	}
 	assert.Equal(t, string(respBody), string(recvRespBody))
+	if !pipe {
+		assert.NotNil(t, recvResp.Header.Get("Date"))
+	}
 
 	received := bufio.NewReader(bytes.NewBuffer(d.Received()))
 	if !isConnect && forwardInitialRequest {
