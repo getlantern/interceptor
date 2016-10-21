@@ -14,6 +14,10 @@ import (
 	"testing"
 )
 
+const (
+	okHeader = "X-Test-OK"
+)
+
 func TestDialFailure(t *testing.T) {
 	op := ops.Begin("TestDialFailure")
 	defer op.End()
@@ -73,6 +77,11 @@ func doTest(t *testing.T, op ops.Op, requestMethod string, pipe bool, forwardIni
 			conn, err := d.Dial("tcp", addr)
 			return conn, pipe, err
 		},
+		OnInitialOK: func(resp *http.Response, req *http.Request) *http.Response {
+			log.Debug("Setting OK header")
+			resp.Header.Set(okHeader, "I'm OK!")
+			return resp
+		},
 	})
 
 	req, _ := http.NewRequest(requestMethod, "http://thehost", nil)
@@ -88,6 +97,7 @@ func doTest(t *testing.T, op ops.Op, requestMethod string, pipe bool, forwardIni
 			return
 		}
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "I'm OK!", resp.Header.Get(okHeader))
 	}
 
 	recvResp, err := http.ReadResponse(r, nil)

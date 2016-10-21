@@ -34,6 +34,7 @@ type Opts struct {
 	GetBuffer           func() []byte
 	PutBuffer           func(buf []byte)
 	OnRequest           func(req *http.Request) *http.Request
+	OnInitialOK         func(resp *http.Response, req *http.Request) *http.Response
 	OnResponse          func(resp *http.Response, req *http.Request, responseNumber int) *http.Response
 	OnReadRequestError  func(w io.Writer, readErr error)
 	OnReadResponseError func(w io.Writer, req *http.Request, readErr error)
@@ -92,16 +93,16 @@ func (ic *interceptor) Intercept(w http.ResponseWriter, req *http.Request, forwa
 	}
 }
 
-func respondOK(writer io.Writer, req *http.Request, respHeaders http.Header) error {
-	return respondHijacked(writer, req, http.StatusOK, respHeaders)
+func (ic *interceptor) respondOK(writer io.Writer, req *http.Request, respHeaders http.Header) error {
+	return ic.respondHijacked(writer, req, http.StatusOK, respHeaders)
 }
 
-func respondBadGatewayHijacked(writer io.Writer, req *http.Request) error {
+func (ic *interceptor) respondBadGatewayHijacked(writer io.Writer, req *http.Request) error {
 	log.Debugf("Responding %v", http.StatusBadGateway)
-	return respondHijacked(writer, req, http.StatusBadGateway, make(http.Header))
+	return ic.respondHijacked(writer, req, http.StatusBadGateway, make(http.Header))
 }
 
-func respondHijacked(writer io.Writer, req *http.Request, statusCode int, respHeaders http.Header) error {
+func (ic *interceptor) respondHijacked(writer io.Writer, req *http.Request, statusCode int, respHeaders http.Header) error {
 	defer func() {
 		if req.Body != nil {
 			if err := req.Body.Close(); err != nil {
@@ -118,6 +119,9 @@ func respondHijacked(writer io.Writer, req *http.Request, statusCode int, respHe
 		StatusCode: statusCode,
 		ProtoMajor: 1,
 		ProtoMinor: 1,
+	}
+	if statusCode == http.StatusOK {
+		resp = ic.OnInitialOK(resp, req)
 	}
 	return resp.Write(writer)
 }

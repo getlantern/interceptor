@@ -16,7 +16,7 @@ func (ic *interceptor) pipe(w http.ResponseWriter, req *http.Request, forwardIni
 	op.Go(func() {
 		// For CONNECT requests, send OK response
 		if req.Method == "CONNECT" {
-			err := respondOK(downstream, req, w.Header())
+			err := ic.respondOK(downstream, req, w.Header())
 			if err != nil {
 				op.FailIf(log.Errorf("Unable to respond OK: %s", err))
 				success <- false
@@ -26,7 +26,7 @@ func (ic *interceptor) pipe(w http.ResponseWriter, req *http.Request, forwardIni
 			err := req.Write(upstream)
 			if err != nil {
 				op.FailIf(log.Errorf("Unable to write initial request: %v", err))
-				respondBadGatewayHijacked(downstream, req)
+				ic.respondBadGatewayHijacked(downstream, req)
 				success <- false
 				return
 			}
@@ -58,6 +58,9 @@ func (ic *interceptor) applyPipeDefaults() {
 	if ic.PutBuffer == nil {
 		ic.PutBuffer = ic.defaultPutBuffer
 	}
+	if ic.OnInitialOK == nil {
+		ic.OnInitialOK = ic.defaultOnInitialOK
+	}
 }
 
 func (ic *interceptor) defaultGetBuffer() []byte {
@@ -67,4 +70,9 @@ func (ic *interceptor) defaultGetBuffer() []byte {
 
 func (ic *interceptor) defaultPutBuffer(buf []byte) {
 	// do nothing
+}
+
+func (ic *interceptor) defaultOnInitialOK(resp *http.Response, req *http.Request) *http.Response {
+	// Do nothing
+	return resp
 }
