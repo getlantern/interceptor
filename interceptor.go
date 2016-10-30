@@ -60,13 +60,15 @@ func (ic *interceptor) Intercept(w http.ResponseWriter, req *http.Request, forwa
 	var downstreamBuffered *bufio.ReadWriter
 	var upstream net.Conn
 
+	closeDownstream := false
+	closeUpstream := false
 	defer func() {
-		if downstream != nil {
+		if closeDownstream {
 			if closeErr := downstream.Close(); closeErr != nil {
 				log.Tracef("Error closing downstream connection: %s", closeErr)
 			}
 		}
-		if upstream != nil {
+		if closeUpstream {
 			if closeErr := upstream.Close(); closeErr != nil {
 				log.Tracef("Error closing upstream connection: %s", closeErr)
 			}
@@ -78,6 +80,7 @@ func (ic *interceptor) Intercept(w http.ResponseWriter, req *http.Request, forwa
 		respondBadGateway(w, op.FailIf(errors.New("Could not dial '%v': %v", addr, err)))
 		return
 	}
+	closeUpstream = true
 
 	// Hijack underlying connection.
 	downstream, downstreamBuffered, err = w.(http.Hijacker).Hijack()
@@ -85,6 +88,7 @@ func (ic *interceptor) Intercept(w http.ResponseWriter, req *http.Request, forwa
 		respondBadGateway(w, op.FailIf(errors.New("Unable to hijack connection: %s", err)))
 		return
 	}
+	closeDownstream = true
 
 	if pipe {
 		ic.pipe(w, req, forwardInitialRequest, op, downstream, downstreamBuffered, upstream)
