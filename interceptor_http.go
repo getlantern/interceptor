@@ -29,6 +29,8 @@ func (ic *interceptor) http(req *http.Request, forwardInitialRequest bool, op op
 func (ic *interceptor) httpUp(req *http.Request, forwardInitialRequest bool, op ops.Op, downstream net.Conn, downstreamBuffered *bufio.ReadWriter, upstream net.Conn, requests chan *http.Request) {
 	defer close(requests)
 
+	remoteAddr := req.RemoteAddr
+
 	var readErr error
 	first := true
 	for {
@@ -60,6 +62,8 @@ func (ic *interceptor) httpUp(req *http.Request, forwardInitialRequest bool, op 
 			}
 			break
 		}
+		// Preserve remote address from original request
+		req.RemoteAddr = remoteAddr
 		first = false
 	}
 }
