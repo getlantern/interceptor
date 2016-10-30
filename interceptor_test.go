@@ -82,9 +82,16 @@ func doTest(t *testing.T, op ops.Op, requestMethod string, pipe bool, forwardIni
 			resp.Header.Set(okHeader, "I'm OK!")
 			return resp
 		},
+		OnRequest: func(req *http.Request) *http.Request {
+			if req.RemoteAddr == "" {
+				t.Fatal("Request missing RemoteAddr!")
+			}
+			return req
+		},
 	})
 
 	req, _ := http.NewRequest(requestMethod, "http://thehost", nil)
+	req.RemoteAddr = "remoteaddr:134"
 	i.Intercept(w, req, forwardInitialRequest, op, 756)
 
 	assert.Equal(t, "thehost:756", d.LastDialed(), "Should have defaulted port to 756")
