@@ -1,9 +1,10 @@
 package interceptor
 
 import (
-	"bufio"
+	"bytes"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"strconv"
@@ -25,12 +26,13 @@ type interceptor struct {
 
 // Interceptor is something that can intercept HTTP requests.
 type Interceptor interface {
-	Intercept(w http.ResponseWriter, req *http.Request, forwardInitialRequest bool, op ops.Op, defaultPort int)
+	Pipe(op ops.Op, w http.ResponseWriter, req *http.Request, defaultPort int)
+	HTTP(op ops.Op, w http.ResponseWriter, req *http.Request, forwardInitialRequest bool, defaultPort int)
 }
 
 // Opts configures an Interceptor.
 type Opts struct {
-	Dial                func(initialReq *http.Request, addr string, port int) (conn net.Conn, pipe bool, err error)
+	Dial                func(req *http.Request, addr string, port int) (net.Conn, error)
 	GetBuffer           func() []byte
 	PutBuffer           func(buf []byte)
 	OnRequest           func(req *http.Request) *http.Request
@@ -48,65 +50,37 @@ func New(opts *Opts) Interceptor {
 	return ic
 }
 
-func (ic *interceptor) Intercept(w http.ResponseWriter, req *http.Request, forwardInitialRequest bool, op ops.Op, defaultPort int) {
+func (ic *interceptor) dialUpstream(op ops.Op, downstream io.Writer, req *http.Request, defaultPort int) net.Conn {
 	addr := hostIncludingPort(req, defaultPort)
 	port, err := portForAddress(addr)
 	if err != nil {
-		respondBadGateway(w, op.FailIf(errors.New("Unable to determine port for address %v: %v", addr, err)))
-		return
+		ic.respondBadGatewayHijacked(downstream, req, op.FailIf(errors.New("Unable to determine port for address %v: %v", addr, err)))
+		return nil
 	}
 
-	var downstream net.Conn
-	var downstreamBuffered *bufio.ReadWriter
-	var upstream net.Conn
-
-	closeDownstream := false
-	closeUpstream := false
-	defer func() {
-		if closeDownstream {
-			if closeErr := downstream.Close(); closeErr != nil {
-				log.Tracef("Error closing downstream connection: %s", closeErr)
-			}
-		}
-		if closeUpstream {
-			if closeErr := upstream.Close(); closeErr != nil {
-				log.Tracef("Error closing upstream connection: %s", closeErr)
-			}
-		}
-	}()
-
-	upstream, pipe, err := ic.Dial(req, addr, port)
+	upstream, err := ic.Dial(req, addr, port)
 	if err != nil {
-		respondBadGateway(w, op.FailIf(errors.New("Could not dial '%v': %v", addr, err)))
-		return
+		ic.respondBadGatewayHijacked(downstream, req, op.FailIf(errors.New("Could not dial '%v': %v", addr, err)))
+		return nil
 	}
-	closeUpstream = true
 
-	// Hijack underlying connection.
-	downstream, downstreamBuffered, err = w.(http.Hijacker).Hijack()
-	if err != nil {
-		respondBadGateway(w, op.FailIf(errors.New("Unable to hijack connection: %s", err)))
-		return
-	}
-	closeDownstream = true
-
-	if pipe {
-		ic.pipe(w, req, forwardInitialRequest, op, downstream, downstreamBuffered, upstream)
-	} else {
-		ic.http(req, forwardInitialRequest, op, downstream, downstreamBuffered, upstream)
-	}
+	return upstream
 }
 
 func (ic *interceptor) respondOK(writer io.Writer, req *http.Request, respHeaders http.Header) error {
-	return ic.respondHijacked(writer, req, http.StatusOK, respHeaders)
+	return ic.respondHijacked(writer, req, http.StatusOK, respHeaders, nil)
 }
 
-func (ic *interceptor) respondBadGatewayHijacked(writer io.Writer, req *http.Request) error {
+func (ic *interceptor) respondBadGatewayHijacked(writer io.Writer, req *http.Request, err error) error {
 	log.Debugf("Responding %v", http.StatusBadGateway)
-	return ic.respondHijacked(writer, req, http.StatusBadGateway, make(http.Header))
+	var body []byte
+	if err != nil {
+		body = []byte(hidden.Clean(err.Error()))
+	}
+	return ic.respondHijacked(writer, req, http.StatusBadGateway, make(http.Header), body)
 }
 
-func (ic *interceptor) respondHijacked(writer io.Writer, req *http.Request, statusCode int, respHeaders http.Header) error {
+func (ic *interceptor) respondHijacked(writer io.Writer, req *http.Request, statusCode int, respHeaders http.Header, body []byte) error {
 	defer func() {
 		if req.Body != nil {
 			if err := req.Body.Close(); err != nil {
@@ -123,6 +97,9 @@ func (ic *interceptor) respondHijacked(writer io.Writer, req *http.Request, stat
 		StatusCode: statusCode,
 		ProtoMajor: 1,
 		ProtoMinor: 1,
+	}
+	if body != nil {
+		resp.Body = ioutil.NopCloser(bytes.NewReader(body))
 	}
 	if statusCode == http.StatusOK {
 		resp = ic.OnInitialOK(resp, req)
