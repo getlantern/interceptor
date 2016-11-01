@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"github.com/getlantern/fdcount"
 	"github.com/getlantern/httptest"
 	"github.com/getlantern/mockconn"
 	"github.com/getlantern/ops"
 	"github.com/stretchr/testify/assert"
 	"io/ioutil"
+	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,16 +32,15 @@ func TestDialFailure(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	assert.Equal(t, "thehost:123", d.LastDialed(), "Should have used specified port of 123")
 	body := w.Body().String()
-	assert.Contains(t, body, "HTTP/1.1 502 Bad Gateway")
-	assert.Contains(t, body, "Could not dial 'thehost:123': I don't want to dial")
+	assert.Empty(t, body)
 }
 
 func TestCONNECT(t *testing.T) {
-	doTest(t, ops.Begin("TestCONNECT"), "CONNECT", true, true)
+	doTest(t, ops.Begin("TestCONNECT"), "CONNECT", false, true)
 }
 
 func TestPipe(t *testing.T) {
-	doTest(t, ops.Begin("TestPipeDontForwardFirst"), "GET", true, false)
+	doTest(t, ops.Begin("TestPipeDontForwardFirst"), "GET", false, false)
 }
 
 func TestHTTPForwardFirst(t *testing.T) {
@@ -51,24 +53,29 @@ func TestHTTPDontForwardFirst(t *testing.T) {
 
 func doTest(t *testing.T, op ops.Op, requestMethod string, pipe bool, forwardInitialRequest bool) {
 	defer op.End()
-	nestedReqBody := []byte("My Request")
-	nestedReq, _ := http.NewRequest("POST", "http://subdomain2.thehost/stuff", ioutil.NopCloser(bytes.NewBuffer(nestedReqBody)))
-	nestedReq.Proto = "HTTP/1.1"
-	nestedReqText := dumpRequest(nestedReq)
 
-	nestedReq2Body := []byte("My Request")
-	nestedReq2, _ := http.NewRequest("POST", "http://subdomain3.thehost/stuff", ioutil.NopCloser(bytes.NewBuffer(nestedReq2Body)))
-	nestedReq2.Proto = "HTTP/1.0"
-	nestedReq2Text := dumpRequest(nestedReq2)
+	l, err := net.Listen("tcp", "localhost:0")
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer l.Close()
 
-	respBody := []byte("My Response")
-	resp := httptest.NewRecorder(nil)
-	resp.WriteHeader(http.StatusCreated)
-	resp.Write(respBody)
-	respText := dumpResponse(resp.Result())
+	pl, err := net.Listen("tcp", "localhost:0")
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer l.Close()
 
-	d := mockconn.SucceedingDialer([]byte(respText))
-	w := httptest.NewRecorder(append([]byte(nestedReqText), nestedReq2Text...))
+	var mx sync.RWMutex
+	seenAddresses := make(map[string]bool)
+	go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		mx.Lock()
+		seenAddresses[req.RemoteAddr] = true
+		mx.Unlock()
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(req.Host))
+	}))
+
 	i := New(&Opts{
 		OnInitialOK: func(resp *http.Response, req *http.Request) *http.Response {
 			log.Debug("Setting OK header")
@@ -83,76 +90,92 @@ func doTest(t *testing.T, op ops.Op, requestMethod string, pipe bool, forwardIni
 		},
 	})
 
-	req, _ := http.NewRequest(requestMethod, "http://subdomain.thehost:756", nil)
+	dial := func(network, addr string) (net.Conn, error) {
+		return net.Dial("tcp", l.Addr().String())
+	}
+
+	go http.Serve(pl, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if pipe {
+			i.Pipe(op, w, req, 756, dial)
+		} else {
+			i.HTTP(op, w, req, forwardInitialRequest, dial)
+		}
+	}))
+
+	_, counter, err := fdcount.Matching("TCP")
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	// We use a single connection for all requests, even though they're going to
+	// different hosts. This simulates user agents like Firefox and Edge that
+	// send requests for multiple hosts across a single proxy connection.
+	conn, err := net.Dial("tcp", pl.Addr().String())
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+
+	roundTrip := func(req *http.Request, readResponse bool) (string, error) {
+		rtErr := req.Write(conn)
+		if rtErr != nil {
+			return "", rtErr
+		}
+		if readResponse {
+			resp, rtErr := http.ReadResponse(br, req)
+			if rtErr != nil {
+				return "", rtErr
+			}
+			body, rtErr := ioutil.ReadAll(resp.Body)
+			if rtErr != nil {
+				return "", rtErr
+			}
+			return string(body), nil
+		}
+		return "", nil
+	}
+
+	req, _ := http.NewRequest(requestMethod, "http://subdomain.thehost", nil)
 	req.RemoteAddr = "remoteaddr:134"
-	if pipe {
-		i.Pipe(op, w, req, 756, d.Dial)
-	} else {
-		i.HTTP(op, w, req, forwardInitialRequest, d.Dial)
-	}
 
-	if pipe {
-		assert.Equal(t, "subdomain.thehost:756", d.LastDialed(), "Should have defaulted port to 756")
-	} else {
-		assert.Equal(t, "subdomain2.thehost:80", d.LastDialed(), "Should have defaulted port to 80")
-	}
-
-	r := bufio.NewReader(w.Body())
-	isConnect := requestMethod == "CONNECT"
-	if isConnect {
-		resp, err := http.ReadResponse(r, nil)
-		if !assert.NoError(t, err) {
-			return
-		}
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-		assert.Equal(t, "I'm OK!", resp.Header.Get(okHeader))
-	}
-
-	recvResp, err := http.ReadResponse(r, nil)
+	includeFirst := requestMethod == "CONNECT" || forwardInitialRequest
+	body, err := roundTrip(req, includeFirst)
 	if !assert.NoError(t, err) {
 		return
 	}
-	recvRespBody, err := ioutil.ReadAll(recvResp.Body)
+	if includeFirst {
+		assert.Equal(t, "subdomain.thehost", body, "Should have left port alone")
+	}
+
+	nestedReqBody := []byte("My Request")
+	nestedReq, _ := http.NewRequest("POST", "http://subdomain2.thehost/a", ioutil.NopCloser(bytes.NewBuffer(nestedReqBody)))
+	nestedReq.Proto = "HTTP/1.1"
+	body, err = roundTrip(nestedReq, true)
 	if !assert.NoError(t, err) {
 		return
 	}
-	assert.Equal(t, string(respBody), string(recvRespBody))
-	if !pipe {
-		assert.NotNil(t, recvResp.Header.Get("Date"))
-	}
+	assert.Equal(t, "subdomain2.thehost", body, "Should have gotten right host")
 
-	received := bufio.NewReader(bytes.NewBuffer(d.Received()))
-	if !isConnect && forwardInitialRequest {
-		recReq, err := http.ReadRequest(received)
-		if !assert.NoError(t, err) {
-			return
-		}
-		assert.Equal(t, dumpRequest(req), dumpRequest(recReq), "Should have forwarded initial request")
+	nestedReq2Body := []byte("My Request")
+	nestedReq2, _ := http.NewRequest("POST", "http://subdomain3.thehost/b", ioutil.NopCloser(bytes.NewBuffer(nestedReq2Body)))
+	nestedReq2.Proto = "HTTP/1.0"
+	body, err = roundTrip(nestedReq2, true)
+	if !assert.NoError(t, err) {
+		return
 	}
+	assert.Equal(t, "subdomain3.thehost", body, "Should have gotten right host")
 
-	if pipe {
-		recvNestedReqText, err := ioutil.ReadAll(received)
-		if !assert.NoError(t, err) {
-			return
-		}
-		assert.Equal(t, nestedReqText+nestedReq2Text, string(recvNestedReqText), "Piped request should be unchanged")
-	} else {
-		recNestedReq, err := http.ReadRequest(received)
-		if !assert.NoError(t, err) {
-			return
-		}
-		recNestedReqBody, err := ioutil.ReadAll(recNestedReq.Body)
-		if !assert.NoError(t, err) {
-			return
-		}
-		assert.Equal(t, string(nestedReqBody), string(recNestedReqBody), "Should have received piped data from downstream")
-		assert.Equal(t, "HTTP/1.1", recNestedReq.Proto, "Protocol should have been upgraded to 1.1")
-		assert.Equal(t, "/stuff", recNestedReq.URL.String(), "Host should have been stripped from URL")
-		assert.Equal(t, "subdomain2.thehost", recNestedReq.Host, "Host should have been populated correctly")
+	expectedConnections := 2
+	if forwardInitialRequest {
+		expectedConnections++
 	}
+	mx.RLock()
+	defer mx.RUnlock()
+	assert.Equal(t, expectedConnections, len(seenAddresses))
 
-	assert.True(t, w.Closed(), "Downstream connection not closed")
-	assert.True(t, d.AllClosed(), "Upstream connection not closed")
+	conn.Close()
+	assert.NoError(t, counter.AssertDelta(0), "All connections should have been closed")
 }
 
 func dumpRequest(req *http.Request) string {

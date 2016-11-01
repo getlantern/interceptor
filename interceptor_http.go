@@ -49,17 +49,14 @@ func (ic *interceptor) processRequests(op ops.Op, remoteAddr string, forwardInit
 
 	first := true
 	for {
-		log.Debug(1)
 		discardRequest := first && !forwardInitialRequest
 		if discardRequest {
-			log.Debug(2)
 			err := ic.OnRequest(req).Write(ioutil.Discard)
 			if err != nil {
 				log.Debugf("Error discarding first request: %v", err)
 				return
 			}
 		} else {
-			log.Debug(3)
 			resp, err := tr.RoundTrip(prepareRequest(ic.OnRequest(req)))
 			if err != nil {
 				log.Debugf("Error round tripping: %v", err)
@@ -68,6 +65,12 @@ func (ic *interceptor) processRequests(op ops.Op, remoteAddr string, forwardInit
 			if !ic.writeResponse(op, downstream, resp) {
 				return
 			}
+		}
+
+		if req.Close {
+			// Client signaled that they would close the connection after this
+			// request, finish
+			return
 		}
 
 		req, readErr = http.ReadRequest(downstreamBuffered.Reader)
@@ -91,7 +94,7 @@ func (ic *interceptor) writeResponse(op ops.Op, downstream net.Conn, resp *http.
 	belowHTTP11 := !resp.Request.ProtoAtLeast(1, 1)
 	if belowHTTP11 && resp.StatusCode < 200 {
 		// HTTP 1.0 doesn't define status codes below 200, discard response
-		// see http://coad.measurement-factory.com/cgi-bin/coad/SpecCgi?session_id=57f811c0_8182_4a442469&spec_id=rfc2616#excerpt/rfc2616/859a092cb26bde76c25284196171c94d
+		// see http://coad.measurement-factory.com/cgi-bin/coad/SpecCgi?spec_id=rfc2616#excerpt/rfc2616/859a092cb26bde76c25284196171c94d
 		out = ioutil.Discard
 	} else {
 		resp = ic.OnResponse(prepareResponse(resp, belowHTTP11), resp.Request, responseNumber)
