@@ -1,17 +1,50 @@
 package interceptor
 
 import (
-	"bufio"
 	"io"
 	"net"
 	"net/http"
 
+	"github.com/getlantern/errors"
 	"github.com/getlantern/idletiming"
 	"github.com/getlantern/netx"
 	"github.com/getlantern/ops"
 )
 
-func (ic *interceptor) pipe(w http.ResponseWriter, req *http.Request, forwardInitialRequest bool, op ops.Op, downstream net.Conn, downstreamBuffered *bufio.ReadWriter, upstream net.Conn) {
+func (ic *interceptor) Pipe(op ops.Op, w http.ResponseWriter, req *http.Request, defaultPort int) {
+	var downstream net.Conn
+	var upstream net.Conn
+	var err error
+
+	closeDownstream := false
+	closeUpstream := false
+	defer func() {
+		if closeDownstream {
+			if closeErr := downstream.Close(); closeErr != nil {
+				log.Tracef("Error closing downstream connection: %s", closeErr)
+			}
+		}
+		if closeUpstream {
+			if closeErr := upstream.Close(); closeErr != nil {
+				log.Tracef("Error closing upstream connection: %s", closeErr)
+			}
+		}
+	}()
+
+	// Hijack underlying connection.
+	downstream, _, err = w.(http.Hijacker).Hijack()
+	if err != nil {
+		respondBadGateway(w, op.FailIf(errors.New("Unable to hijack connection: %s", err)))
+		return
+	}
+	closeDownstream = true
+
+	upstream = ic.dialUpstream(op, downstream, req, defaultPort)
+	if upstream == nil {
+		return
+	}
+	closeUpstream = true
+
 	success := make(chan bool, 1)
 	op.Go(func() {
 		// For CONNECT requests, send OK response
@@ -19,14 +52,6 @@ func (ic *interceptor) pipe(w http.ResponseWriter, req *http.Request, forwardIni
 			err := ic.respondOK(downstream, req, w.Header())
 			if err != nil {
 				op.FailIf(log.Errorf("Unable to respond OK: %s", err))
-				success <- false
-				return
-			}
-		} else if forwardInitialRequest {
-			err := req.Write(upstream)
-			if err != nil {
-				op.FailIf(log.Errorf("Unable to write initial request: %v", err))
-				ic.respondBadGatewayHijacked(downstream, req)
 				success <- false
 				return
 			}

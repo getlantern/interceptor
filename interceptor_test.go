@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"testing"
+	"time"
 )
 
 const (
@@ -24,27 +25,25 @@ func TestDialFailure(t *testing.T) {
 	d := mockconn.FailingDialer(errors.New("I don't want to dial"))
 	w := httptest.NewRecorder(nil)
 	i := New(&Opts{
-		Dial: func(req *http.Request, addr string, port int) (net.Conn, bool, error) {
+		Dial: func(req *http.Request, addr string, port int) (net.Conn, error) {
 			conn, err := d.Dial("tcp", addr)
-			return conn, false, err
+			return conn, err
 		},
 	})
 	req, _ := http.NewRequest("CONNECT", "http://thehost:123", nil)
-	i.Intercept(w, req, false, op, 756)
+	go i.HTTP(op, w, req, true, 756)
+	time.Sleep(100 * time.Millisecond)
 	assert.Equal(t, "thehost:123", d.LastDialed(), "Should have used specified port of 123")
-	assert.Equal(t, http.StatusBadGateway, w.Code())
-	assert.Equal(t, "Could not dial 'thehost:123': I don't want to dial", w.Body().String())
+	body := w.Body().String()
+	assert.Contains(t, body, "HTTP/1.1 502 Bad Gateway")
+	assert.Contains(t, body, "Could not dial 'thehost:123': I don't want to dial")
 }
 
 func TestCONNECT(t *testing.T) {
 	doTest(t, ops.Begin("TestCONNECT"), "CONNECT", true, true)
 }
 
-func TestPipeForwardFirst(t *testing.T) {
-	doTest(t, ops.Begin("TestPipeForwardFirst"), "GET", true, true)
-}
-
-func TestPipeDontForwardFirst(t *testing.T) {
+func TestPipe(t *testing.T) {
 	doTest(t, ops.Begin("TestPipeDontForwardFirst"), "GET", true, false)
 }
 
@@ -59,9 +58,14 @@ func TestHTTPDontForwardFirst(t *testing.T) {
 func doTest(t *testing.T, op ops.Op, requestMethod string, pipe bool, forwardInitialRequest bool) {
 	defer op.End()
 	nestedReqBody := []byte("My Request")
-	nestedReq, _ := http.NewRequest("POST", "http://subdomain.thehost/stuff", ioutil.NopCloser(bytes.NewBuffer(nestedReqBody)))
-	nestedReq.Proto = "HTTP/1.0"
+	nestedReq, _ := http.NewRequest("POST", "http://subdomain2.thehost/stuff", ioutil.NopCloser(bytes.NewBuffer(nestedReqBody)))
+	nestedReq.Proto = "HTTP/1.1"
 	nestedReqText := dumpRequest(nestedReq)
+
+	nestedReq2Body := []byte("My Request")
+	nestedReq2, _ := http.NewRequest("POST", "http://subdomain3.thehost/stuff", ioutil.NopCloser(bytes.NewBuffer(nestedReq2Body)))
+	nestedReq2.Proto = "HTTP/1.0"
+	nestedReq2Text := dumpRequest(nestedReq2)
 
 	respBody := []byte("My Response")
 	resp := httptest.NewRecorder(nil)
@@ -70,12 +74,11 @@ func doTest(t *testing.T, op ops.Op, requestMethod string, pipe bool, forwardIni
 	respText := dumpResponse(resp.Result())
 
 	d := mockconn.SucceedingDialer([]byte(respText))
-	w := httptest.NewRecorder([]byte(nestedReqText))
+	w := httptest.NewRecorder(append([]byte(nestedReqText), nestedReq2Text...))
 	i := New(&Opts{
-		Dial: func(req *http.Request, addr string, port int) (net.Conn, bool, error) {
-			log.Debug(addr)
+		Dial: func(req *http.Request, addr string, port int) (net.Conn, error) {
 			conn, err := d.Dial("tcp", addr)
-			return conn, pipe, err
+			return conn, err
 		},
 		OnInitialOK: func(resp *http.Response, req *http.Request) *http.Response {
 			log.Debug("Setting OK header")
@@ -90,11 +93,19 @@ func doTest(t *testing.T, op ops.Op, requestMethod string, pipe bool, forwardIni
 		},
 	})
 
-	req, _ := http.NewRequest(requestMethod, "http://thehost", nil)
+	req, _ := http.NewRequest(requestMethod, "http://subdomain.thehost", nil)
 	req.RemoteAddr = "remoteaddr:134"
-	i.Intercept(w, req, forwardInitialRequest, op, 756)
+	if pipe {
+		i.Pipe(op, w, req, 756)
+	} else {
+		i.HTTP(op, w, req, forwardInitialRequest, 756)
+	}
 
-	assert.Equal(t, "thehost:756", d.LastDialed(), "Should have defaulted port to 756")
+	if pipe {
+		assert.Equal(t, "subdomain.thehost:756", d.LastDialed(), "Should have defaulted port to 756")
+	} else {
+		assert.Equal(t, "subdomain3.thehost:756", d.LastDialed(), "Should have defaulted port to 756")
+	}
 
 	r := bufio.NewReader(w.Body())
 	isConnect := requestMethod == "CONNECT"
@@ -134,7 +145,7 @@ func doTest(t *testing.T, op ops.Op, requestMethod string, pipe bool, forwardIni
 		if !assert.NoError(t, err) {
 			return
 		}
-		assert.Equal(t, string(nestedReqText), string(recvNestedReqText), "Piped request should be unchanged")
+		assert.Equal(t, nestedReqText+nestedReq2Text, string(recvNestedReqText), "Piped request should be unchanged")
 	} else {
 		recNestedReq, err := http.ReadRequest(received)
 		if !assert.NoError(t, err) {
@@ -147,7 +158,7 @@ func doTest(t *testing.T, op ops.Op, requestMethod string, pipe bool, forwardIni
 		assert.Equal(t, string(nestedReqBody), string(recNestedReqBody), "Should have received piped data from downstream")
 		assert.Equal(t, "HTTP/1.1", recNestedReq.Proto, "Protocol should have been upgraded to 1.1")
 		assert.Equal(t, "/stuff", recNestedReq.URL.String(), "Host should have been stripped from URL")
-		assert.Equal(t, "subdomain.thehost", recNestedReq.Host, "Host should have been populated correctly")
+		assert.Equal(t, "subdomain2.thehost", recNestedReq.Host, "Host should have been populated correctly")
 	}
 
 	assert.True(t, w.Closed(), "Downstream connection not closed")
