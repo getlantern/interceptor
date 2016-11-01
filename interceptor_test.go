@@ -9,7 +9,6 @@ import (
 	"github.com/getlantern/ops"
 	"github.com/stretchr/testify/assert"
 	"io/ioutil"
-	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -24,14 +23,9 @@ func TestDialFailure(t *testing.T) {
 	defer op.End()
 	d := mockconn.FailingDialer(errors.New("I don't want to dial"))
 	w := httptest.NewRecorder(nil)
-	i := New(&Opts{
-		Dial: func(req *http.Request, addr string, port int) (net.Conn, error) {
-			conn, err := d.Dial("tcp", addr)
-			return conn, err
-		},
-	})
+	i := New(&Opts{})
 	req, _ := http.NewRequest("CONNECT", "http://thehost:123", nil)
-	go i.HTTP(op, w, req, true, 756)
+	go i.HTTP(op, w, req, true, d.Dial)
 	time.Sleep(100 * time.Millisecond)
 	assert.Equal(t, "thehost:123", d.LastDialed(), "Should have used specified port of 123")
 	body := w.Body().String()
@@ -76,10 +70,6 @@ func doTest(t *testing.T, op ops.Op, requestMethod string, pipe bool, forwardIni
 	d := mockconn.SucceedingDialer([]byte(respText))
 	w := httptest.NewRecorder(append([]byte(nestedReqText), nestedReq2Text...))
 	i := New(&Opts{
-		Dial: func(req *http.Request, addr string, port int) (net.Conn, error) {
-			conn, err := d.Dial("tcp", addr)
-			return conn, err
-		},
 		OnInitialOK: func(resp *http.Response, req *http.Request) *http.Response {
 			log.Debug("Setting OK header")
 			resp.Header.Set(okHeader, "I'm OK!")
@@ -93,18 +83,18 @@ func doTest(t *testing.T, op ops.Op, requestMethod string, pipe bool, forwardIni
 		},
 	})
 
-	req, _ := http.NewRequest(requestMethod, "http://subdomain.thehost", nil)
+	req, _ := http.NewRequest(requestMethod, "http://subdomain.thehost:756", nil)
 	req.RemoteAddr = "remoteaddr:134"
 	if pipe {
-		i.Pipe(op, w, req, 756)
+		i.Pipe(op, w, req, 756, d.Dial)
 	} else {
-		i.HTTP(op, w, req, forwardInitialRequest, 756)
+		i.HTTP(op, w, req, forwardInitialRequest, d.Dial)
 	}
 
 	if pipe {
 		assert.Equal(t, "subdomain.thehost:756", d.LastDialed(), "Should have defaulted port to 756")
 	} else {
-		assert.Equal(t, "subdomain3.thehost:756", d.LastDialed(), "Should have defaulted port to 756")
+		assert.Equal(t, "subdomain2.thehost:80", d.LastDialed(), "Should have defaulted port to 80")
 	}
 
 	r := bufio.NewReader(w.Body())

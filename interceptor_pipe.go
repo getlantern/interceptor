@@ -11,7 +11,7 @@ import (
 	"github.com/getlantern/ops"
 )
 
-func (ic *interceptor) Pipe(op ops.Op, w http.ResponseWriter, req *http.Request, defaultPort int) {
+func (ic *interceptor) Pipe(op ops.Op, w http.ResponseWriter, req *http.Request, defaultPort int, dial func(network, addr string) (net.Conn, error)) {
 	var downstream net.Conn
 	var upstream net.Conn
 	var err error
@@ -39,8 +39,9 @@ func (ic *interceptor) Pipe(op ops.Op, w http.ResponseWriter, req *http.Request,
 	}
 	closeDownstream = true
 
-	upstream = ic.dialUpstream(op, downstream, req, defaultPort)
-	if upstream == nil {
+	upstream, err = dial("tcp", hostIncludingPort(req, defaultPort))
+	if err != nil {
+		ic.respondBadGatewayHijacked(downstream, req, err)
 		return
 	}
 	closeUpstream = true

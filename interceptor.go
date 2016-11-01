@@ -2,15 +2,14 @@ package interceptor
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
 	"github.com/getlantern/hidden"
 	"github.com/getlantern/ops"
@@ -26,13 +25,13 @@ type interceptor struct {
 
 // Interceptor is something that can intercept HTTP requests.
 type Interceptor interface {
-	Pipe(op ops.Op, w http.ResponseWriter, req *http.Request, defaultPort int)
-	HTTP(op ops.Op, w http.ResponseWriter, req *http.Request, forwardInitialRequest bool, defaultPort int)
+	Pipe(op ops.Op, w http.ResponseWriter, req *http.Request, defaultPort int, dial func(network, addr string) (net.Conn, error))
+	HTTP(op ops.Op, w http.ResponseWriter, req *http.Request, forwardInitialRequest bool, dial func(network, addr string) (net.Conn, error))
 }
 
 // Opts configures an Interceptor.
 type Opts struct {
-	Dial                func(req *http.Request, addr string, port int) (net.Conn, error)
+	IdleTimeout         time.Duration
 	GetBuffer           func() []byte
 	PutBuffer           func(buf []byte)
 	OnRequest           func(req *http.Request) *http.Request
@@ -48,23 +47,6 @@ func New(opts *Opts) Interceptor {
 	ic.applyHTTPDefaults()
 	ic.applyPipeDefaults()
 	return ic
-}
-
-func (ic *interceptor) dialUpstream(op ops.Op, downstream io.Writer, req *http.Request, defaultPort int) net.Conn {
-	addr := hostIncludingPort(req, defaultPort)
-	port, err := portForAddress(addr)
-	if err != nil {
-		ic.respondBadGatewayHijacked(downstream, req, op.FailIf(errors.New("Unable to determine port for address %v: %v", addr, err)))
-		return nil
-	}
-
-	upstream, err := ic.Dial(req, addr, port)
-	if err != nil {
-		ic.respondBadGatewayHijacked(downstream, req, op.FailIf(errors.New("Could not dial '%v': %v", addr, err)))
-		return nil
-	}
-
-	return upstream
 }
 
 func (ic *interceptor) respondOK(writer io.Writer, req *http.Request, respHeaders http.Header) error {
@@ -123,18 +105,6 @@ func hostIncludingPort(req *http.Request, defaultPort int) string {
 		return req.Host + ":" + strconv.Itoa(defaultPort)
 	}
 	return req.Host
-}
-
-func portForAddress(addr string) (int, error) {
-	_, portString, err := net.SplitHostPort(addr)
-	if err != nil {
-		return 0, fmt.Errorf("Unable to determine port for address %v: %v", addr, err)
-	}
-	port, err := strconv.Atoi(portString)
-	if err != nil {
-		return 0, fmt.Errorf("Unable to parse port %v for address %v: %v", addr, port, err)
-	}
-	return port, nil
 }
 
 func isUnexpected(err error) bool {
